@@ -554,6 +554,31 @@ export default function App() {
     await loadAddressBooks();
   }
 
+  async function renameAddressBook(id: string, name: string) {
+    // The main process pushes the new name to the server (PROPPATCH) when the
+    // book is linked, mirroring list rename; here we just persist + reload.
+    await window.api.addressbooks?.update(id, { name } as Partial<AddressBook>);
+    await loadAddressBooks();
+  }
+
+  async function createServerBook(name: string, accountId: string) {
+    // Fall back to a local book if this build's bridge has no server-create
+    // (e.g. the Thunderbird add-on shim), so the choice never silently no-ops.
+    if (!window.api.addressbooks?.createServer) { await createAddressBook(name); return; }
+    try {
+      await window.api.addressbooks.createServer(accountId, name);
+      await loadAddressBooks();
+      setSyncMsg(`Created "${name}" on server — syncing…`);
+      await syncAccountNow(accountId);
+      await loadContacts();
+      setSyncMsg(`Created "${name}" on server.`);
+      setTimeout(() => setSyncMsg(null), 4000);
+    } catch (err: any) {
+      setSyncMsg(`Server address book creation failed: ${err?.message || err}`);
+      setTimeout(() => setSyncMsg(null), 6000);
+    }
+  }
+
   async function disconnectBook(b: AddressBook) {
     if (!window.confirm(`Disconnect "${b.name}" from CardDAV?\n\nIt stops syncing but its contacts stay on this computer. Nothing is deleted on the server.`)) return;
     await window.api.addressbooks?.unlink(b.id);
@@ -978,9 +1003,12 @@ export default function App() {
         <ContactsSidebar
           addressBooks={addressBooks}
           contacts={contacts}
+          accounts={accounts.map((a) => ({ id: a.id, label: a.label }))}
           filter={contactFilter}
           onSelect={setContactFilter}
           onCreateBook={createAddressBook}
+          onCreateServerBook={createServerBook}
+          onRenameBook={renameAddressBook}
           labelColors={labelColors}
           onSetLabelColor={setLabelColor}
           onDeleteLabel={deleteLabel}

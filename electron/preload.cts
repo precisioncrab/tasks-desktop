@@ -39,7 +39,8 @@ const api = {
     discover: (accountId: string) => ipcRenderer.invoke("addressbooks:discover", accountId),
     link: (bookId: string, accountId: string, url: string) => ipcRenderer.invoke("addressbooks:link", bookId, accountId, url),
     connect: (accountId: string, url: string, displayName: string) => ipcRenderer.invoke("addressbooks:connect", accountId, url, displayName),
-    unlink: (bookId: string) => ipcRenderer.invoke("addressbooks:unlink", bookId)
+    unlink: (bookId: string) => ipcRenderer.invoke("addressbooks:unlink", bookId),
+    createServer: (accountId: string, name: string) => ipcRenderer.invoke("addressbooks:createServer", accountId, name)
   },
   maintenance: {
     dedupe: (dryRun?: boolean) => ipcRenderer.invoke("maintenance:dedupe", dryRun)
@@ -76,7 +77,8 @@ const api = {
     unlinkList: (listId: string) => ipcRenderer.invoke("accounts:unlinkList", listId),
     sync: (accountId: string) => ipcRenderer.invoke("accounts:sync", accountId),
     createServerCalendar: (accountId: string, name: string) => ipcRenderer.invoke("accounts:createServerCalendar", accountId, name),
-    deleteServerCalendar: (accountId: string, calendarUrl: string) => ipcRenderer.invoke("accounts:deleteServerCalendar", accountId, calendarUrl)
+    deleteServerCalendar: (accountId: string, calendarUrl: string) => ipcRenderer.invoke("accounts:deleteServerCalendar", accountId, calendarUrl),
+    bootstrapDefaults: (accountId: string) => ipcRenderer.invoke("accounts:bootstrapDefaults", accountId)
   },
   on: (channel: string, callback: (...args: any[]) => void) => {
     const listener = (_e: any, ...args: any[]) => callback(...args);

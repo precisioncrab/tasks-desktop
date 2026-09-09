@@ -51,7 +51,7 @@ import {
 } from "./db.js";
 import { testConnection, discoverCalendars, linkListToCalendar, unlinkList, syncAccount, createServerCalendar, deleteServerCalendar, encryptPassword, connectCalendar, syncLog, pushCalendarName } from "./caldav.js";
 import { taskToVTodo, eventToVEvent, bundleIcs } from "./ical.js";
-import { discoverAddressBooks, linkAddressBook, unlinkAddressBook, syncAccountContacts, connectAddressBook, importVCards } from "./carddav.js";
+import { discoverAddressBooks, linkAddressBook, unlinkAddressBook, syncAccountContacts, connectAddressBook, importVCards, createServerAddressBook, pushAddressBookName } from "./carddav.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
@@ -565,7 +565,28 @@ function registerIpc() {
 
   ipcMain.handle("addressbooks:all", () => addressBooksAll());
   ipcMain.handle("addressbooks:create", (_e, name: string, color?: string) => addressBookCreate(name, color));
-  ipcMain.handle("addressbooks:update", (_e, id: string, patch: any) => addressBookUpdate(id, patch));
+  ipcMain.handle("addressbooks:update", async (_e, id: string, patch: any) => {
+    const before = addressBooksAll().find((b) => b.id === id);
+    const updated = addressBookUpdate(id, patch);
+    // A rename of a linked address book must reach the server too -- PROPPATCH
+    // the collection's DAV:displayname (mirrors the list-rename path). Best-effort:
+    // a failure leaves the local rename in place, retried next rename.
+    if (
+      patch && typeof patch.name === "string" &&
+      before && patch.name !== before.name &&
+      updated.carddav_account_id && updated.carddav_addressbook_url
+    ) {
+      const account = accountsAll().find((a) => a.id === updated.carddav_account_id);
+      if (account) {
+        try {
+          await pushAddressBookName(account, updated.carddav_addressbook_url, updated.name);
+        } catch (err) {
+          console.error("Failed to push address book rename to server:", err);
+        }
+      }
+    }
+    return updated;
+  });
   ipcMain.handle("addressbooks:delete", (_e, id: string) => addressBookDelete(id));
   ipcMain.handle("addressbooks:discover", async (_e, accountId: string) => {
     const account = accountsAll().find((a) => a.id === accountId);
@@ -661,6 +682,56 @@ function registerIpc() {
     const account = accountsAll().find((a) => a.id === accountId);
     if (!account) throw new Error("Account not found");
     return deleteServerCalendar(account, calendarUrl);
+  });
+  ipcMain.handle("addressbooks:createServer", async (_e, accountId: string, name: string) => {
+    const account = accountsAll().find((a) => a.id === accountId);
+    if (!account) throw new Error("Account not found");
+    return createServerAddressBook(account, name);
+  });
+  // Auto-provision default collections on an otherwise-empty server so a
+  // freshly-added account is immediately usable without the server's own admin
+  // UI. Creates a "Calendar" (holds tasks + events) when the CalDAV home has no
+  // calendars, and a "Contacts" book when the CardDAV home has none. A no-op
+  // where collections already exist (Synology, Nextcloud, ...); each half is
+  // best-effort so a failure on one never blocks the other or the account itself.
+  ipcMain.handle("accounts:bootstrapDefaults", async (_e, accountId: string) => {
+    const account = accountsAll().find((a) => a.id === accountId);
+    if (!account) throw new Error("Account not found");
+    const created: { calendar?: string; addressBook?: string } = {};
+    if (account.server_url) {
+      try {
+        const cals = await discoverCalendars(account);
+        if (cals.length === 0) {
+          await createServerCalendar(account, "Calendar");
+          created.calendar = "Calendar";
+        }
+      } catch (err: any) {
+        syncLog(`bootstrap: default calendar not created for "${account.label}": ${err?.message || err}`);
+      }
+    }
+    // Contacts: prefer a dedicated CardDAV URL, but fall back to the CalDAV/base
+    // URL -- unified servers (Radicale, Baikal) serve CardDAV at the SAME address,
+    // so a user who entered only a CalDAV URL still wants a contacts book. On a
+    // CalDAV-only host (e.g. Synology's calendar endpoint), discoverAddressBooks
+    // throws and this is a safe no-op. (clientFor uses carddav_url || server_url.)
+    if (account.carddav_url || account.server_url) {
+      try {
+        const books = await discoverAddressBooks(account);
+        if (books.length === 0) {
+          await createServerAddressBook(account, "Contacts");
+          created.addressBook = "Contacts";
+        }
+        // Discovery succeeded off the base URL with no separate CardDAV URL set,
+        // so this server does CardDAV at the same address: record it so future
+        // syncs and the Settings Contacts pane treat this as a CardDAV account.
+        if (!account.carddav_url) {
+          accountUpdate(account.id, { carddav_url: account.server_url } as any);
+        }
+      } catch (err: any) {
+        syncLog(`bootstrap: default contacts book not created for "${account.label}": ${err?.message || err}`);
+      }
+    }
+    return created;
   });
   ipcMain.handle("accounts:sync", (_e, accountId: string) => runExclusive(async () => {
     const account = accountsAll().find((a) => a.id === accountId);

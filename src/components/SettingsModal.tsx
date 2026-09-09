@@ -125,28 +125,69 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
     }
     setBusy(true);
     setTestMsg(null);
+    // Snapshot the URLs entered, since the fields are cleared before the slow
+    // (backgrounded) provisioning step runs.
+    const hadCalUrl = !!serverUrl;
+    const hadCardUrl = !!draftCarddavUrl;
+    let createdId = "";
     try {
       // Request host permission for whichever URL(s) were entered (CalDAV and
       // CardDAV can live on different hosts) in ONE call -- a second
       // permissions.request() after an await loses the click's user gesture.
       if (!(await window.api.accounts.ensureHostPermission([serverUrl, draftCarddavUrl].filter(Boolean)))) {
         setTestMsg("Permission to contact that server was denied.");
+        setBusy(false);
         return;
       }
       const created = await window.api.accounts.create({ label: label || serverUrl || draftCarddavUrl, server_url: serverUrl, username, password });
+      createdId = created.id;
       if (draftCarddavUrl) await window.api.accounts.update(created.id, { carddav_url: draftCarddavUrl });
       setLabel(""); setServerUrl(""); setUsername(""); setPassword(""); setDraftCarddavUrl("");
       await refresh();
-      // Discover calendars only when a CalDAV URL was given; discover address
-      // books when a CardDAV URL was given. A CardDAV-only account skips the
-      // calendar discovery that would otherwise fail with no CalDAV server.
-      if (serverUrl) await discover(created.id);
-      if (draftCarddavUrl && window.api.addressbooks) await discoverBooks(created.id);
     } catch (err: any) {
       setTestMsg(err?.message || String(err));
-    } finally {
       setBusy(false);
+      return;
     }
+    // The account exists and the form is cleared, so release the form NOW: the
+    // default-collection provisioning and discovery below each hit the network
+    // (several round-trips on a fresh server) and previously held the Add
+    // Account form disabled until they finished. Run them in the background and
+    // update state as results arrive.
+    setBusy(false);
+    void (async () => {
+      // Auto-provision default collections on a server that has none yet (e.g. a
+      // fresh self-hosted CalDAV/CardDAV server). A no-op on servers that already
+      // have collections (Synology, Nextcloud, ...).
+      try {
+        const made = await window.api.accounts.bootstrapDefaults?.(createdId);
+        const parts = [made?.calendar && "calendar", made?.addressBook && "contacts book"].filter(Boolean);
+        if (parts.length) setTestMsg(`Created a default ${parts.join(" and ")} on the server.`);
+      } catch (err: any) {
+        // Non-fatal -- the account is still added; the user can create lists by hand.
+        setTestMsg(`Account added, but default collections could not be created: ${cleanErr(err)}`);
+      }
+      // Refresh App's account + list/book state so the new account and any
+      // bootstrapped collections appear immediately (without this, the sidebar's
+      // "+ New list -> On server" dropdown stayed stale until an app restart).
+      onListsChanged();
+      // Refresh this modal's calendar/book panes for the new account WITHOUT the
+      // busy flag, so the Add Account form stays responsive. Re-read the account
+      // first: bootstrap may have set carddav_url on a unified server (Radicale).
+      if (hadCalUrl) {
+        try {
+          const cals = await window.api.accounts.discoverCalendars(createdId);
+          setCalendarsByAccount((p) => ({ ...p, [createdId]: cals }));
+        } catch { /* ignore */ }
+      }
+      try {
+        const acc = (await window.api.accounts.all()).find((a) => a.id === createdId);
+        if ((hadCardUrl || acc?.carddav_url) && window.api.addressbooks) {
+          const books = (await window.api.addressbooks.discover(createdId)) ?? [];
+          setAddressBooksByAccount((p) => ({ ...p, [createdId]: books }));
+        }
+      } catch { /* ignore */ }
+    })();
   }
 
   async function testDraft() {

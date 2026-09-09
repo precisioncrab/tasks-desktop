@@ -74,6 +74,16 @@ function localParentId(parentUid: string | null, listId: string): string | null 
   return null;
 }
 
+/** True when an error message (or an HTTP status) indicates the resource is
+ *  absent on the server: a 404 (Not Found) or 410 (Gone). Used both for the
+ *  "collection is dead" pull case and the "already deleted" delete case, where
+ *  absence is the desired end state, not a failure. */
+function isNotFound(msgOrStatus: string | number | undefined | null): boolean {
+  if (msgOrStatus == null) return false;
+  if (typeof msgOrStatus === "number") return msgOrStatus === 404 || msgOrStatus === 410;
+  return /\b(404|410)\b/.test(msgOrStatus);
+}
+
 /** Compare two object URLs by path only (servers report absolute or relative). */
 function samePath(a: string, b: string): boolean {
   const p = (u: string) => { try { return new URL(u, "http://x").pathname; } catch { return u; } };
@@ -367,13 +377,34 @@ export async function deleteServerCalendar(account: CaldavAccount, calendarUrl: 
 export async function createServerCalendar(account: CaldavAccount, name: string): Promise<TaskList> {
   const client = await clientFor(account);
 
-  // Derive the calendar home URL from an existing calendar (strip its last path segment).
-  const calendars = await client.fetchCalendars();
-  if (calendars.length === 0) {
-    throw new Error("No existing calendars found on server — cannot determine where to create the new calendar.");
+  // Determine the calendar-home URL. Prefer the principal's calendar-home-set,
+  // resolved via tsdav account discovery -- this works even when the server has
+  // ZERO calendars (e.g. a fresh Radicale user), which is exactly the case the old
+  // "derive from an existing calendar" approach could not handle: it threw, so the
+  // very first list could never be created. Fall back to deriving the home from an
+  // existing calendar for any server that doesn't cleanly advertise the home.
+  let calHomeUrl = "";
+  try {
+    const acct = await client.createAccount({
+      account: { serverUrl: account.server_url, accountType: "caldav" },
+      loadCollections: false,
+      loadObjects: false
+    });
+    if (acct?.homeUrl) calHomeUrl = String(acct.homeUrl).replace(/\/?$/, "/");
+  } catch {
+    /* discovery failed -- fall back to the existing-calendar derivation below */
   }
-  const existingUrl = String(calendars[0].url).replace(/\/?$/, "/");
-  const calHomeUrl = existingUrl.replace(/[^/]+\/$/, "");
+
+  if (!calHomeUrl) {
+    const calendars = await client.fetchCalendars();
+    if (calendars.length === 0) {
+      throw new Error(
+        "Could not determine where to create the calendar: the server advertised no calendar-home-set and has no existing calendars to derive it from."
+      );
+    }
+    const existingUrl = String(calendars[0].url).replace(/\/?$/, "/");
+    calHomeUrl = existingUrl.replace(/[^/]+\/$/, "");
+  }
 
   // Build a URL-safe slug from the name.
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "list";
@@ -689,20 +720,35 @@ async function syncEvents(client: Client, list: TaskList) {
       .prepare(`SELECT * FROM events WHERE list_id = ? AND deleted = 1 AND caldav_uid IS NOT NULL`)
       .all(list.id) as unknown as CalendarEvent[];
     for (const e of deletedWithRemote) {
+      // Same guard as tasks: only hard-delete locally once the server copy is
+      // gone (2xx or 404/410). A failed delete keeps the tombstone so the pull
+      // can't resurrect the event and it retries next sync.
+      let gone = false;
       try {
-        await client.deleteCalendarObject({
+        const res: any = await client.deleteCalendarObject({
           calendarObject: { url: e.caldav_href || "", etag: e.caldav_etag || "" }
         });
+        gone = res?.ok === true || isNotFound(res?.status);
+        if (!gone) {
+          syncLog(`event delete kept pending for "${e.title}" (${e.caldav_uid}): HTTP ${res?.status ?? "?"}`);
+        }
       } catch (err: any) {
         syncLog(`event delete FAILED for "${e.title}": ${err?.message || err}`);
       }
-      eventDelete(e.id, true);
+      if (gone) eventDelete(e.id, true);
     }
 
     eventsPruneMissing(list.id, remoteUids);
     syncLog(`events: synced list "${list.name}" — pulled ${pulled}, pushed ${pushed}`);
   } catch (err: any) {
-    syncLog(`events sync FAILED for list "${list.name}": ${err?.message || err}`);
+    const msg = err?.message || String(err);
+    if (isNotFound(msg)) {
+      // Same dead-collection case as the task pull; already non-fatal here
+      // (event errors never surface as sync errors), just log it clearly.
+      syncLog(`events: list "${list.name}" calendar is gone on the server (404 at ${calendarUrl}); skipped.`);
+    } else {
+      syncLog(`events sync FAILED for list "${list.name}": ${msg}`);
+    }
   }
 }
 
@@ -717,22 +763,41 @@ async function syncList(client: Client, list: TaskList): Promise<SyncResult> {
     // excludes VTODO items (our tasks) from the server's response. Request VTODO
     // explicitly so to-dos actually come back.
     console.log(`[caldav] fetchCalendarObjects starting for ${calendarUrl}`);
-    const objects = await Promise.race([
-      client.fetchCalendarObjects({
-        calendar,
-        filters: [
-          {
-            "comp-filter": {
-              _attributes: { name: "VCALENDAR" },
+    let objects: Awaited<ReturnType<typeof client.fetchCalendarObjects>>;
+    try {
+      objects = await Promise.race([
+        client.fetchCalendarObjects({
+          calendar,
+          filters: [
+            {
               "comp-filter": {
-                _attributes: { name: "VTODO" }
+                _attributes: { name: "VCALENDAR" },
+                "comp-filter": {
+                  _attributes: { name: "VTODO" }
+                }
               }
             }
-          }
-        ] as any
-      }),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("fetchCalendarObjects timed out after 15s")), 15000))
-    ]);
+          ] as any
+        }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("fetchCalendarObjects timed out after 15s")), 15000))
+      ]);
+    } catch (err: any) {
+      // A 404 on the collection query means this list is linked to a calendar
+      // that no longer exists on the server (deleted, or moved to a new URL).
+      // tsdav throws "Collection query failed: 404 ...". Nothing can pull or
+      // push against a dead collection, so stop this list with a clear,
+      // actionable message instead of the raw library error -- and DON'T run
+      // the delete phase below, so pending deletions stay queued for a
+      // re-linked calendar rather than being silently dropped.
+      const msg = err?.message || String(err);
+      if (isNotFound(msg)) {
+        const clear = `List "${list.name}" is linked to a calendar that no longer exists on the server (404 at ${calendarUrl}). Re-link this list to a current calendar in Settings, or remove it.`;
+        syncLog(clear);
+        result.errors.push(clear);
+        return result;
+      }
+      throw err;
+    }
     console.log(`[caldav] fetchCalendarObjects returned ${objects.length} object(s) for ${calendarUrl}`);
     const remoteByUid = new Map<string, { url: string; etag: string; data: string }>();
     let tParseIdx = 0;
@@ -993,14 +1058,30 @@ async function syncList(client: Client, list: TaskList): Promise<SyncResult> {
       .prepare(`SELECT * FROM tasks WHERE list_id = ? AND deleted = 1 AND caldav_uid IS NOT NULL`)
       .all(list.id) as unknown as Task[];
     for (const t of deletedWithRemote) {
+      // Only hard-delete locally once the server copy is actually gone.
+      // deleteCalendarObject returns a Response (it does NOT throw on an HTTP
+      // error status), so a failed delete used to be ignored while the local
+      // tombstone was destroyed anyway -- the next pull then re-created the
+      // task from the still-present server copy (the "deleted tasks come back"
+      // bug). Now: 2xx or 404/410 means gone -> complete the delete locally;
+      // anything else (network throw, 5xx, 412) keeps the tombstone so the pull
+      // can't resurrect it (it skips deleted rows) and it retries next sync.
+      let gone = false;
       try {
-        await client.deleteCalendarObject({
+        const res: any = await client.deleteCalendarObject({
           calendarObject: { url: t.caldav_href || "", etag: t.caldav_etag || "" }
         });
+        gone = res?.ok === true || isNotFound(res?.status);
+        if (!gone) {
+          const detail = `HTTP ${res?.status ?? "?"}${res?.statusText ? ` ${res.statusText}` : ""}`;
+          result.errors.push(`Delete failed for "${t.title}": ${detail} — will retry next sync`);
+          syncLog(`task delete kept pending for "${t.title}" (${t.caldav_uid}): ${detail}`);
+        }
       } catch (err: any) {
-        result.errors.push(`Delete failed for "${t.title}": ${err?.message || err}`);
+        result.errors.push(`Delete failed for "${t.title}": ${err?.message || err} — will retry next sync`);
+        syncLog(`task delete threw for "${t.title}" (${t.caldav_uid}): ${err?.message || err}`);
       }
-      taskDelete(t.id, true);
+      if (gone) taskDelete(t.id, true);
     }
   } catch (err: any) {
     syncLog(`sync FAILED for list "${list.name}": ${err?.message || err}`);

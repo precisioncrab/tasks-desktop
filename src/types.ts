@@ -226,6 +226,9 @@ declare global {
         link: (bookId: string, accountId: string, url: string) => Promise<void>;
         connect: (accountId: string, url: string, displayName: string) => Promise<AddressBook>;
         unlink: (bookId: string) => Promise<void>;
+        /** Create a new address book ON THE SERVER (MKCOL) + link a local book.
+         *  Absent in the add-on shim -- optional-chain. */
+        createServer?: (accountId: string, name: string) => Promise<AddressBook>;
       };
       /** Absent in the Thunderbird add-on shim -- always optional-chain. */
       maintenance?: {
@@ -273,6 +276,10 @@ declare global {
         sync: (accountId: string) => Promise<{ listId: string; pulled: number; pushed: number; errors: string[] }[]>;
         createServerCalendar: (accountId: string, name: string) => Promise<TaskList>;
         deleteServerCalendar: (accountId: string, calendarUrl: string) => Promise<void>;
+        /** Auto-create default collections (Calendar / Contacts) on a server
+         *  that has none yet. No-op where collections already exist. Absent in
+         *  the add-on shim -- optional-chain. */
+        bootstrapDefaults?: (accountId: string) => Promise<{ calendar?: string; addressBook?: string }>;
       };
       on: (channel: string, callback: (...args: any[]) => void) => () => void;
     };

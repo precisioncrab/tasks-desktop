@@ -116,6 +116,106 @@ export function unlinkAddressBook(bookId: string) {
   addressBookUpdate(bookId, { carddav_account_id: null, carddav_addressbook_url: null, carddav_ctag: null } as Partial<AddressBook>);
 }
 
+/** Push a renamed address book's title to the server as the collection's
+ *  DAV:displayname via PROPPATCH, so a rename in the app propagates to the
+ *  server (Radicale / Nextcloud / Synology) instead of staying local. Mirrors
+ *  caldav.ts's pushCalendarName. Best-effort: throws on failure so the caller
+ *  can log it while keeping the local rename. */
+export async function pushAddressBookName(account: CaldavAccount, addressBookUrl: string, name: string): Promise<void> {
+  const client = await clientFor(account);
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const body =
+    `<?xml version="1.0" encoding="utf-8"?>` +
+    `<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop>` +
+    `<d:displayname>${esc(name)}</d:displayname>` +
+    `</d:prop></d:set></d:propertyupdate>`;
+  const res = await client.davRequest({
+    url: addressBookUrl,
+    init: {
+      method: "PROPPATCH",
+      headers: { "content-type": "application/xml; charset=utf-8" },
+      body
+    },
+    convertIncoming: false,
+    parseOutgoing: false
+  });
+  const ok = !Array.isArray(res) || res.every((r) => r.ok !== false && (r.status ? r.status < 400 : true));
+  syncLog(`PROPPATCH displayname (addressbook) ${addressBookUrl} -> "${name}": ${ok ? "ok" : JSON.stringify(res)}`);
+  if (!ok) throw new Error(`Server rejected address book displayname change (${JSON.stringify(res)})`);
+}
+
+/** Create a new address book collection ON THE SERVER, then create + link a
+ *  local book to it. The CardDAV twin of caldav.ts's createServerCalendar:
+ *  it resolves the addressbook-home from the principal (so it works even when
+ *  the server has ZERO address books, e.g. a fresh Radicale user), and only
+ *  falls back to deriving the home from an existing book. tsdav has no
+ *  makeAddressBook helper, so the MKCOL is issued directly (mirroring how
+ *  makeCalendar issues MKCALENDAR), declaring an addressbook resourcetype. */
+export async function createServerAddressBook(account: CaldavAccount, name: string): Promise<AddressBook> {
+  const client = await clientFor(account);
+
+  let homeUrl = "";
+  try {
+    const acct = await client.createAccount({
+      account: { serverUrl: account.carddav_url || account.server_url, accountType: "carddav" },
+      loadCollections: false,
+      loadObjects: false
+    });
+    if (acct?.homeUrl) homeUrl = String(acct.homeUrl).replace(/\/?$/, "/");
+  } catch {
+    /* discovery failed -- fall back to the existing-book derivation below */
+  }
+
+  if (!homeUrl) {
+    const books = await client.fetchAddressBooks();
+    if (books.length === 0) {
+      throw new Error(
+        "Could not determine where to create the address book: the server advertised no addressbook-home-set and has no existing address books to derive it from."
+      );
+    }
+    const existingUrl = String(books[0].url).replace(/\/?$/, "/");
+    homeUrl = existingUrl.replace(/[^/]+\/$/, "");
+  }
+
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "contacts";
+  const newBookUrl = `${homeUrl}${slug}-${Date.now()}/`;
+
+  // MKCOL with an addressbook resourcetype. The DAV: (d) and CardDAV (card)
+  // namespaces are declared on the <mkcol> element so <card:addressbook> is valid.
+  const res = await client.davRequest({
+    url: newBookUrl,
+    init: {
+      method: "MKCOL",
+      namespace: "d",
+      body: {
+        "d:mkcol": {
+          _attributes: {
+            "xmlns:d": "DAV:",
+            "xmlns:card": "urn:ietf:params:xml:ns:carddav"
+          },
+          "d:set": {
+            "d:prop": {
+              "d:resourcetype": {
+                "d:collection": {},
+                "card:addressbook": {}
+              },
+              "d:displayname": name
+            }
+          }
+        }
+      }
+    }
+  });
+  const r = res?.[0];
+  if (r && r.ok === false) {
+    throw new Error(`Server refused to create the address book (${r.status}${r.statusText ? ` ${r.statusText}` : ""}).`);
+  }
+
+  const book = addressBookCreate(name);
+  linkAddressBook(book.id, account.id, newBookUrl);
+  return addressBooksAll().find((b) => b.id === book.id)!;
+}
+
 // ---------- Contact <-> vCard row mapping ----------
 function jsonArr(s: string): any[] {
   try { const v = JSON.parse(s || "[]"); return Array.isArray(v) ? v : []; } catch { return []; }

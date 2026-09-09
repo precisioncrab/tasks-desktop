@@ -243,7 +243,7 @@ export default function Sidebar({
             )}
           </div>
         ) : (
-          <button className="sidebar-add" onClick={openAddList}>+ New list</button>
+          <button className="sidebar-add" onClick={openAddList}>+ New list/calendar</button>
         )}
       </div>
       <div className="sidebar-footer">

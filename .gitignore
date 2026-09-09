@@ -13,3 +13,9 @@ thunderbird-addon/
 # Packaged add-on produced by `npm run package:addon`
 *.xpi
 *.zip
+
+# Bundled server (Radicale) build artifacts -- keep server/ source, drop builds
+server/.venv
+server/build
+server/dist
+__pycache__/

@@ -264,7 +264,7 @@ export default function ContactDetailPanel({ contact, addressBooks, existingLabe
         <>
           <label>Address book</label>
           <select value={bookId} onChange={(e) => { setBookId(e.target.value); mark(); }}>
-            {addressBooks.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+            {addressBooks.map((b) => <option key={b.id} value={b.id}>{b.name}{b.carddav_addressbook_url ? " ⇄" : ""}</option>)}
           </select>
         </>
       )}

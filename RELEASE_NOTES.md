@@ -1,41 +1,34 @@
-Daynizer v0.6.0 — a mouse-editable calendar, multi-day events, and timed tasks
+Daynizer v0.6.1 — sync-server compatibility fixes
 
-This release makes the week/day calendar directly editable with the mouse, adds timed tasks,
-defaults the due date sensibly, and fixes the Thunderbird add-on's default-list setting. It also
-folds in the auto-growing notes fields from the 0.5.1/0.5.2 experimental builds. Builds on 0.5.x.
-Daynizer is still beta.
+Changes since 0.6.0. Daynizer is still beta.
 
-## Calendar — drag to resize and stretch
-- **Resize events and tasks from either edge.** Bars are now grab-able on both edges, not just the
-  end. In week/day view drag a timed event's (or a Start-Due task's) top or bottom edge (up/down)
-  to change its start or end time; in month view drag either side of a bar (left/right) to change
-  which days it covers. Fixes stretching not working in week view.
-- **Drag a timed event across days.** Grab the left or right edge of a timed event in week view and
-  pull it sideways to make it span multiple days (e.g. a job running Thu 8 AM -> Sat 5 PM), drawn
-  as day-by-day segments. Pull it back to shrink. It previews live as you drag.
-- **The resize cursor shows on every edge now.** Hovering an edge reliably shows the double-arrow
-  stretch cursor instead of the move hand -- previously the bar's own title could cover the start
-  edge, so it looked un-stretchable from that side.
-- **Click a squeezed bar to work with it.** When overlapping items are packed into narrow
-  side-by-side columns, selecting one pops it out to the full column width and to the front, so its
-  edges are easy to grab.
+## CalDAV / CardDAV — works with a brand-new server
+- **Create the first list on an empty server.** Creating a list/calendar on the server now works even
+  when the account has no calendars yet. Daynizer asks the server for your calendar home directly
+  instead of deriving it from an existing calendar, so adding a brand-new or self-hosted CalDAV account
+  (e.g. a fresh Radicale/Baïkal/Nextcloud user with nothing on it yet) and creating your first list
+  works. Previously this failed with "No existing calendars found on server."
+- **Create an address book on the server.** You can now create a contacts collection directly on a
+  CardDAV server, the same way lists are created on a CalDAV server.
+- **New accounts get default collections automatically.** When you add an account whose server has no
+  calendars and/or no address books yet, Daynizer creates a default "Calendar" and "Contacts"
+  collection for you, so the account is usable immediately without touching the server's own admin
+  interface. Servers that already have collections (Synology, Nextcloud, …) are left untouched.
+- **A newly added account appears right away.** After adding an account in Settings, it now shows up
+  immediately in the "+ New list → On server" dropdown instead of only after restarting the app.
 
-## Calendar — timed tasks
-- **Tasks with a time now show as time blocks.** A task created at a specific time in the day/week
-  view (or given start/due times) appears as a block at that time, instead of always landing in the
-  all-day row. "Due date only" and "Start date only" each show a block at their own time; the
-  Start-Due range shows the full span. Date-only tasks, and month view, keep the all-day bar.
-
-## Tasks
-- **Due date follows the start date.** Setting a start date now fills in the due date to the same
-  day when it's still blank -- it never overwrites a due date you've already chosen.
-
-## Notes fields
-- **Auto-growing notes.** Note fields on tasks and events grow to fit what you type, with a corner
-  toggle to collapse or expand them.
-
-## Thunderbird add-on
-- **Default list / default calendar now stick.** The add-on now stores its settings, so your chosen
-  default task list and default event calendar persist across reloads and are honored when you
-  create a task or event from the calendar view. Previously these were ignored in the add-on, so a
-  task created from the calendar view landed in the wrong list.
+## Contacts & UI
+- **Create an address book on the server or locally.** The "New address book" form now offers the same
+  Local / On-server choice the calendar/list sidebar has, so you can make a contacts collection on a
+  server directly.
+- **Adding an account no longer freezes the form.** The default-collection setup after you save an
+  account now runs in the background, so the Add Account form stays responsive instead of blocking
+  until the server round-trips finish.
+- **Clearer button label.** The sidebar's "New list" button is now "New list/calendar", since a list
+  and a calendar are the same thing in Daynizer.
+- **Sync marker in the contact's address-book picker.** The address-book dropdown in a contact's
+  details now shows the ⇄ sync symbol next to server-synced books, so a synced "Contacts" is
+  distinguishable from a local one (matching the sidebar).
+- **Rename an address book.** Right-click an address book in the Contacts sidebar → Rename (inline,
+  like lists). For a server-synced book the new name is pushed to the server (PROPPATCH displayname),
+  matching how list rename works.

@@ -1,0 +1,9 @@
+# Build-time deps for freezing the bundled Daynizer sync server (Radicale).
+# Install into a venv:  py -m pip install -r requirements.txt
+#
+# Note: bcrypt is pulled in so Radicale can read/write bcrypt htpasswd files;
+# passlib is Radicale's hashing layer. PyInstaller is the freezer.
+radicale>=3.5,<4
+passlib>=1.7.4
+bcrypt>=4.0
+pyinstaller>=6.6
