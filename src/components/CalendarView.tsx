@@ -4,6 +4,7 @@ import "@event-calendar/core/index.css";
 import { RRule } from "rrule";
 import { CalendarEvent, EventOverride, Task, TaskList } from "../types";
 import { selectWidth } from "../selectWidth";
+import { appLocale, firstDayOfWeek } from "../dateFormat";
 import ContextMenu from "./ContextMenu";
 
 export type CalendarShow = "both" | "tasks" | "events";
@@ -484,6 +485,15 @@ export default function CalendarView({
       // drop "today" since our own Month/Week/Day toggle button (in
       // .calendar-view-toolbar below) replaces it.
       headerToolbar: { start: "title", center: "", end: "prev,next" },
+      // The library formats its own column headings, view title and hour
+      // gutter through `Intl`; without a locale it resolves one internally,
+      // which needn't match what the rest of the app resolves. Pass ours so
+      // the calendar can't disagree with the task table beside it.
+      locale: appLocale(),
+      // `firstDay` defaults to 0 (Sunday) regardless of locale, so every
+      // Monday-first region -- all of Europe -- got the wrong week layout.
+      // Resolved once at mount: the locale can't change without a restart.
+      firstDay: firstDayOfWeek(),
       // Current-time marker line, only shown in the timeGrid week/day views.
       nowIndicator: true,
       // Enable drag-to-reschedule and edge-resize. Per-event `editable` /
