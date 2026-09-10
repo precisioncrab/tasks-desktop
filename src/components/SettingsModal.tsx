@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { CaldavAccountPublic, DiscoveredCalendar, DiscoveredAddressBook, AddressBook, TaskList } from "../types";
+import { formatDateTime } from "../dateFormat";
 
 /** Renderer-side twin of db.ts's davUrlKey: normalize a CalDAV/CardDAV URL so
  *  http<->https, trailing-slash, default-port and host-casing differences don't
@@ -583,7 +584,7 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
                   <div className="status">{linkedCalCount(acc)} calendar(s), {linkedBookCount(acc)} address book(s) linked</div>
                   {acc.last_sync_at && (
                     <div className={`status ${acc.last_sync_status === "error" ? "error" : ""}`}>
-                      Last sync: {new Date(acc.last_sync_at).toLocaleString()} ({acc.last_sync_status})
+                      Last sync: {formatDateTime(acc.last_sync_at)} ({acc.last_sync_status})
                     </div>
                   )}
                 </div>

@@ -4,7 +4,7 @@ import "@event-calendar/core/index.css";
 import { RRule } from "rrule";
 import { CalendarEvent, EventOverride, Task, TaskList } from "../types";
 import { selectWidth } from "../selectWidth";
-import { appLocale, firstDayOfWeek } from "../dateFormat";
+import { appLocale, firstDayOfWeek, formatTime } from "../dateFormat";
 import ContextMenu from "./ContextMenu";
 
 export type CalendarShow = "both" | "tasks" | "events";
@@ -556,7 +556,7 @@ export default function CalendarView({
       // to chase the library's internal conversion, render the time badge
       // ourselves: `arg.event.start`/`.end` here are already a correctly
       //-converted local `Date` (the library's own `toLocalDate()` helper),
-      // so a plain `toLocaleTimeString` on it is trustworthy.
+      // so formatting it through dateFormat here is trustworthy.
       eventContent(arg: any) {
         const escape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         // A small ↻ badge marks generated recurrence occurrences so they read
@@ -566,7 +566,7 @@ export default function CalendarView({
           if (!mark) return undefined; // default (title-only) rendering is fine
           return { html: `${mark}<span class="ec-event-title">${escape(arg.event.title)}</span>` };
         }
-        const timeText = (arg.event.start as Date).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+        const timeText = formatTime(arg.event.start as Date);
         return { html: `${mark}<time class="ec-event-time">${escape(timeText)}</time><h4 class="ec-event-title">${escape(arg.event.title)}</h4>` };
       },
       eventClick(info: any) {
