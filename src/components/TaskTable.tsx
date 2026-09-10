@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Task, PRIORITY_COLORS } from "../types";
+import { capitalizeFirst, formatRelativeDays, formatShortDate, formatTime, isDateOnly, isSameLocalDay, parseStored } from "../dateFormat";
 
 interface Props {
   tasks: Task[]; // already filtered to the current scope, includes subtasks
@@ -14,14 +15,21 @@ interface Props {
 
 function formatDue(due: string | null): { text: string; overdue: boolean } | null {
   if (!due) return null;
-  const d = new Date(due);
+  // parseStored, not `new Date(due)`: the latter reads a date-only value as UTC
+  // midnight, so west of UTC an all-day task due today rendered as yesterday
+  // AND, failing the same-day test below, was styled overdue on its own day.
+  const d = parseStored(due);
+  if (!d) return null;
   const now = new Date();
-  const hasTime = due.length > 10;
+  const hasTime = !isDateOnly(due);
+  const isToday = isSameLocalDay(d, now);
   // Date-only tasks aren't overdue during their own day; timed tasks are
   // overdue the moment their time passes.
-  const overdue = hasTime ? d < now : d < now && d.toDateString() !== now.toDateString();
-  let text = d.toDateString() === now.toDateString() ? "Today" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  if (hasTime) text += ` ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+  const overdue = hasTime ? d < now : d < now && !isToday;
+  // "Today" comes from Intl rather than a literal, so it follows the locale
+  // ("heute", "aujourd'hui") like the date beside it already does.
+  let text = isToday ? capitalizeFirst(formatRelativeDays(0)) : formatShortDate(d);
+  if (hasTime) text += ` ${formatTime(d)}`;
   return { text, overdue };
 }
 

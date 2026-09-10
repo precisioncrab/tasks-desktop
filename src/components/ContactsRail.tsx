@@ -1,4 +1,5 @@
 import { Contact } from "../types";
+import { formatRelativeDays, formatShortDate } from "../dateFormat";
 
 interface Props {
   contacts: Contact[];
@@ -37,10 +38,10 @@ function nextOccurrence(month: number, day: number, from: Date) {
   return { date: d, daysUntil };
 }
 
+/** "today" / "tomorrow" / "in 5 days", localized. `Intl.RelativeTimeFormat`
+ *  with `numeric: "auto"` produces exactly these three shapes itself. */
 function whenLabel(n: number): string {
-  if (n <= 0) return "today";
-  if (n === 1) return "tomorrow";
-  return `in ${n} days`;
+  return formatRelativeDays(Math.max(0, n));
 }
 
 export default function ContactsRail({ contacts, onSelectContact, collapsed, onToggleCollapsed }: Props) {
@@ -85,7 +86,7 @@ export default function ContactsRail({ contacts, onSelectContact, collapsed, onT
             <span className="today-pane-title">
               {u.name}
               <span style={{ color: "#8a8d93" }}>
-                {" · "}{u.date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                {" · "}{formatShortDate(u.date)}
                 {u.turning != null ? ` · turns ${u.turning}` : ""}
               </span>
             </span>
