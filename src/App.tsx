@@ -151,8 +151,36 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [menu, setMenu] = useState<{ x: number; y: number; taskId: string } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsPane, setSettingsPane] = useState<"accounts" | "calendars" | "contacts" | "sync" | "server" | "notifications" | undefined>(undefined);
   const [showAbout, setShowAbout] = useState(false);
   const [showImport, setShowImport] = useState(false);
+
+  // First-run cue for the built-in sync server: if it's enabled but the setup
+  // card hasn't been dismissed yet, open Settings to the Sync Server pane so the
+  // user sees (and can change) the auto-generated username/password once.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await window.api.server?.status();
+        if (!cancelled && s && s.feature && s.enabled && !s.configured) {
+          setSettingsPane("server");
+          setShowSettings(true);
+        }
+      } catch { /* no server IPC (add-on) — skip */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // The main process auto-creates/updates Daynizer's own account against the
+  // built-in server; refresh lists/accounts/contacts when it signals it's ready
+  // so the account and its default Calendar/Contacts appear without a restart.
+  useEffect(() => {
+    if (!window.api.server) return;
+    return window.api.on("server:accountReady", () => {
+      loadLists(); loadTasks(); loadAccounts(); loadAddressBooks(); loadContacts();
+    });
+  }, []);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [forceAddingList, setForceAddingList] = useState(false);
@@ -1292,7 +1320,8 @@ export default function App() {
         <SettingsModal
           lists={lists}
           addressBooks={addressBooks}
-          onClose={() => setShowSettings(false)}
+          initialPane={settingsPane}
+          onClose={() => { setShowSettings(false); setSettingsPane(undefined); }}
           onListsChanged={() => { loadLists(); loadTasks(); loadAccounts(); loadAddressBooks(); loadContacts(); }}
           onSyncAccount={syncAccountNow}
           onReviewDuplicates={() => { setShowSettings(false); setMainView("contacts"); setContactsMode("duplicates"); }}

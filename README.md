@@ -85,9 +85,42 @@ right-click (or Ctrl-click) the app in Applications and choose **Open**, then co
 needed once. Update by installing a newer .dmg over the old copy; remove by deleting the app from
 Applications.
 
+## Built-in sync server (no external server needed)
+
+Don't have a CalDAV/CardDAV server? Daynizer can run its own. When you turn it on, Daynizer starts a
+bundled sync server in the background, wires *itself* up to it automatically, and gives you one address
+you can point your phone and other computers at — so your tasks, calendar, and contacts sync across your
+devices with no third-party account, no NAS, and no cloud.
+
+**Turn it on:** open **Settings → Sync Server** and tick **Run the built-in sync server**. That's it —
+Daynizer creates a "Built-in server" account for itself with default Calendar and Contacts lists, and
+the server keeps running in the background (and in the tray when the window is closed). The pane shows
+the one **address** to use, plus the **username** and **password** (both editable and copyable).
+
+**Add your other devices:** point any CalDAV/CardDAV app at the address shown — the **same address serves
+both calendars and contacts**, and clients discover both from it:
+
+- **Android:** [DAVx5](https://www.davx5.com/) with the address + username/password, then **Tasks.org**
+  (or OpenTasks) for the task lists.
+- **iPhone / macOS:** Settings → add an **Advanced CalDAV account** (and a **CardDAV account**) using the
+  server IP, port, username, and password (turn SSL off for a plain-`http` LAN address).
+- **Thunderbird / another Daynizer:** paste the address and credentials into a new network calendar /
+  address book, or into another Daynizer's **Add account** form.
+
+Both devices must be on the **same network**. The server uses port **5232** by default (changeable in the
+pane); if it's ever in use, Daynizer picks another and tells you. On Windows you may need to allow the port
+through the firewall the first time. Step-by-step instructions for each app are in **Settings → Sync
+Server → How to connect**, and online at
+[precisioncrab.com/daynizer/connect](https://precisioncrab.com/daynizer/connect/).
+
+> The built-in server is for your **own devices on your own network**. It's plain HTTP on the LAN (fine
+> for a trusted home network; DAVx5 shows a one-time warning). Exposing it to the public internet is not
+> recommended.
+
 ## Connecting a CalDAV / CardDAV server (Synology, Nextcloud, …)
 
-Daynizer syncs **tasks & calendars over CalDAV** and **contacts over CardDAV**. Open **Settings**
+Prefer your own server (Synology, Nextcloud, Baïkal, Radicale, …)? Daynizer syncs **tasks & calendars
+over CalDAV** and **contacts over CardDAV**. Open **Settings**
 (the "CalDAV / CardDAV accounts…" button in the sidebar) → **Add account** and fill in:
 
 - **CalDAV URL** — the calendars/tasks endpoint (optional if you only want contacts).

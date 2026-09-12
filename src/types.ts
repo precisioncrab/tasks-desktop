@@ -166,6 +166,25 @@ export interface DiscoveredAddressBook {
   ctag: string | null;
 }
 
+/** Built-in sync server status (renderer twin of electron/serverManager.ts's
+ *  ServerStatus). One base URL serves both CalDAV and CardDAV. */
+export interface ServerStatus {
+  feature: boolean;        // compiled-in
+  enabled: boolean;        // user wants it running
+  available: boolean;      // frozen binary present for this platform
+  running: boolean;        // spawned + health-checked
+  configured: boolean;     // first-run setup card dismissed
+  port: number | null;     // port bound right now
+  preferredPort: number;   // port the user asked for
+  baseUrl: string | null;  // LAN URL — give to phones / other apps
+  localUrl: string | null; // 127.0.0.1 URL — for a client on THIS machine
+  username: string;
+  error: string | null;
+  note: string | null;     // non-fatal note (e.g. preferred port was taken)
+  lastActivity: number | null; // epoch ms of the last request from another device
+}
+export interface ServerInfo extends ServerStatus { password: string; }
+
 export const PRIORITY_LABELS: Record<number, string> = {
   0: "None",
   1: "High",
@@ -280,6 +299,20 @@ declare global {
          *  that has none yet. No-op where collections already exist. Absent in
          *  the add-on shim -- optional-chain. */
         bootstrapDefaults?: (accountId: string) => Promise<{ calendar?: string; addressBook?: string }>;
+      };
+      /** Built-in sync server (Electron desktop only; absent in the add-on shim
+       *  -- always optional-chain). One base URL serves CalDAV + CardDAV. */
+      server?: {
+        status: () => Promise<ServerStatus>;
+        info: () => Promise<ServerInfo>;
+        start: () => Promise<ServerStatus>;
+        stop: () => Promise<ServerStatus>;
+        restart: () => Promise<ServerStatus>;
+        setEnabled: (on: boolean) => Promise<ServerStatus>;
+        setPort: (port: number) => Promise<ServerStatus>;
+        setCredentials: (opts: { username?: string; password?: string }) => Promise<ServerStatus>;
+        regeneratePassword: () => Promise<ServerInfo>;
+        markConfigured: () => Promise<ServerStatus>;
       };
       on: (channel: string, callback: (...args: any[]) => void) => () => void;
     };

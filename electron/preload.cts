@@ -80,6 +80,22 @@ const api = {
     deleteServerCalendar: (accountId: string, calendarUrl: string) => ipcRenderer.invoke("accounts:deleteServerCalendar", accountId, calendarUrl),
     bootstrapDefaults: (accountId: string) => ipcRenderer.invoke("accounts:bootstrapDefaults", accountId)
   },
+  // Built-in sync server (Phase B2). status()/info() read current state; info()
+  // also returns the generated password for the pairing/manual-add screen (C3).
+  // start/stop/restart drive the supervised child. Subscribe to live changes via
+  // api.on("server:status", (status) => …).
+  server: {
+    status: () => ipcRenderer.invoke("server:status"),
+    info: () => ipcRenderer.invoke("server:info"),
+    start: () => ipcRenderer.invoke("server:start"),
+    stop: () => ipcRenderer.invoke("server:stop"),
+    restart: () => ipcRenderer.invoke("server:restart"),
+    setEnabled: (on: boolean) => ipcRenderer.invoke("server:setEnabled", on),
+    setPort: (port: number) => ipcRenderer.invoke("server:setPort", port),
+    setCredentials: (opts: { username?: string; password?: string }) => ipcRenderer.invoke("server:setCredentials", opts),
+    regeneratePassword: () => ipcRenderer.invoke("server:regeneratePassword"),
+    markConfigured: () => ipcRenderer.invoke("server:markConfigured")
+  },
   on: (channel: string, callback: (...args: any[]) => void) => {
     const listener = (_e: any, ...args: any[]) => callback(...args);
     ipcRenderer.on(channel, listener);

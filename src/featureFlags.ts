@@ -19,3 +19,14 @@
  * flip-the-flag + test (Step 7), not re-typing code.
  */
 export const RECURRING_PER_OCCURRENCE = false;
+
+/**
+ * Built-in sync server (bundled Radicale) — Phase B2+ in DAYNIZER-SERVER-PLAN.md.
+ *
+ * NOTE: the server runs in the Electron MAIN process, which can't import this
+ * renderer module at runtime, so the AUTHORITATIVE flag lives main-side as
+ * `SERVER_BUILTIN` in `electron/serverManager.ts`. This constant is the
+ * renderer-side mirror for when the onboarding/status UI arrives (C1/C3); until
+ * then there's no server UI to gate. Keep the two in sync — flip both together.
+ */
+export const SERVER_BUILTIN = false;

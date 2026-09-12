@@ -52,6 +52,7 @@ import {
 import { testConnection, discoverCalendars, linkListToCalendar, unlinkList, syncAccount, createServerCalendar, deleteServerCalendar, encryptPassword, connectCalendar, syncLog, pushCalendarName } from "./caldav.js";
 import { taskToVTodo, eventToVEvent, bundleIcs } from "./ical.js";
 import { discoverAddressBooks, linkAddressBook, unlinkAddressBook, syncAccountContacts, connectAddressBook, importVCards, createServerAddressBook, pushAddressBookName } from "./carddav.js";
+import { serverManager, type ServerStatus } from "./serverManager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
@@ -92,6 +93,7 @@ const SETTING_DEFAULTS: Record<string, string> = {
   reminderTime: "18:00", // when date-only tasks fire
   closeToTray: "0", // off by default: the X button really quits; opt in via settings
   launchAtLogin: "0",
+  launchHidden: "1", // when autostarting, boot to the tray with no window (C1)
   syncIntervalMinutes: "60", // background auto-sync; matches Tasks.org's default; "0" = manual only
   syncHotkey: "CmdOrCtrl+R", // accelerator for Sync Now; "" = no hotkey
   allowInsecureCerts: "0" // opt-in: accept self-signed TLS certs (self-hosted LAN servers)
@@ -123,8 +125,86 @@ function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+// ---------- Built-in server: auto-wired self-account (Phase B3) ----------
+// So the user never types the built-in server's URL/credentials into THIS app:
+// once the server is running, ensure a Daynizer account exists pointing at it
+// (localhost, the generated creds), provision its default Calendar + Contacts,
+// and keep it in step when the port/username/password change. Runs only when the
+// server's connection details actually change (tracked by a signature persisted
+// in settings), so normal launches don't redo the work.
+const SELF_ACCOUNT_ID_KEY = "serverSelfAccountId";
+const SELF_ACCOUNT_SIG_KEY = "serverSelfSig";
+let selfAccountBusy = false;
+
+async function ensureSelfAccount(): Promise<void> {
+  if (!serverManager.isEnabled() || selfAccountBusy) return;
+  const info = serverManager.getInfo();
+  if (!info.running || !info.localUrl) return; // only wire against a live server
+
+  const sig = `${info.localUrl}|${info.username}|${info.password}`;
+  const selfId = getSetting(SELF_ACCOUNT_ID_KEY);
+  const existing = selfId ? accountsAll().find((a) => a.id === selfId) : undefined;
+  // Nothing to do if the config is unchanged AND the account still exists.
+  if (sig === getSetting(SELF_ACCOUNT_SIG_KEY) && existing) return;
+
+  selfAccountBusy = true;
+  try {
+    let account = existing;
+    if (account) {
+      accountUpdate(account.id, {
+        server_url: info.localUrl,
+        carddav_url: info.localUrl,
+        username: info.username,
+        password_enc: encryptPassword(info.password)
+      } as any);
+      account = accountsAll().find((a) => a.id === account!.id);
+    } else {
+      account = accountCreate({
+        label: "Built-in server",
+        server_url: info.localUrl,
+        carddav_url: info.localUrl,
+        username: info.username,
+        password_enc: encryptPassword(info.password)
+      } as any);
+      settingSet(SELF_ACCOUNT_ID_KEY, account.id);
+    }
+    if (!account) return;
+
+    // Provision default collections if the (possibly newly re-homed) principal is
+    // empty. Idempotent: a no-op when Calendar / Contacts already exist.
+    try {
+      const cals = await discoverCalendars(account);
+      if (cals.length === 0) await createServerCalendar(account, "Calendar");
+    } catch (err: any) { syncLog(`self-account: default calendar: ${err?.message || err}`); }
+    try {
+      const books = await discoverAddressBooks(account);
+      if (books.length === 0) await createServerAddressBook(account, "Contacts");
+    } catch (err: any) { syncLog(`self-account: default contacts: ${err?.message || err}`); }
+
+    // First sync so the local lists/books link up and appear in the UI.
+    try {
+      await syncAccount(account);
+      const hasBooks = addressBooksAll().some((b) => b.carddav_account_id === account!.id && b.carddav_addressbook_url);
+      if (hasBooks) { try { await syncAccountContacts(account); } catch { /* logged elsewhere */ } }
+      accountUpdate(account.id, { last_sync_at: new Date().toISOString(), last_sync_status: "ok" } as any);
+    } catch (err: any) {
+      syncLog(`self-account sync: ${err?.message || err}`);
+    }
+
+    settingSet(SELF_ACCOUNT_SIG_KEY, sig);
+    mainWindow?.webContents.send("server:accountReady");
+  } catch (err: any) {
+    syncLog(`ensureSelfAccount failed: ${err?.message || err}`);
+  } finally {
+    selfAccountBusy = false;
+  }
+}
+
 function showMainWindow() {
   if (!mainWindow) { createWindow(); return; }
+  // A window created hidden for a background start skips the taskbar; restore it
+  // now that the user is opening it.
+  mainWindow.setSkipTaskbar(false);
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (!mainWindow.isVisible()) mainWindow.show();
   // Windows blocks a background process from stealing the foreground, so a plain
@@ -138,13 +218,18 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
-function createWindow() {
+function createWindow(show = true) {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
     minWidth: 820,
     minHeight: 520,
     title: "Daynizer",
+    // Start hidden when autostarted in the background (C1): the app boots straight
+    // to the tray with the server running and no window. showMainWindow() reveals it.
+    show,
+    // Don't flash a taskbar button for a background start; showMainWindow re-enables it.
+    skipTaskbar: !show,
     // Explicit window icon so the taskbar button always shows the app icon
     // regardless of how the exe was launched (installed shortcut, portable
     // unpacked exe, or dev). Without this, Windows falls back to the generic
@@ -187,14 +272,16 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  // "Close to tray" (opt-in, off by default): when enabled in settings, the X
-  // button hides the window so reminders keep firing. When disabled, closing
-  // the window quits the app. Quitting is always available from the tray menu
-  // and File > Exit.
+  // Close-to-tray: the X button hides the window instead of quitting when EITHER
+  // the user opted in (closeToTray) OR the built-in server is running — the server
+  // is meant to be an always-on background service (C1), so closing the window must
+  // not take it down. Quitting is always available from the tray menu and File > Exit.
   mainWindow.on("close", (e) => {
-    if (!isQuiting && getSetting("closeToTray") === "1") {
+    const keepAliveForServer = serverManager.isEnabled() && serverManager.isUserEnabled();
+    if (!isQuiting && (getSetting("closeToTray") === "1" || keepAliveForServer)) {
       e.preventDefault();
       mainWindow?.hide();
+      mainWindow?.setSkipTaskbar(true);
       return;
     }
     // Real quit. If there are local edits that haven't reached the server yet,
@@ -235,11 +322,7 @@ function setupTray() {
     // so they're never confused with an installed production build at a glance.
     tray = new Tray(nativeImage.createFromPath(iconPath(isDistinctBuild ? "32x32-dev.png" : "32x32.png")));
     tray.setToolTip(isDev ? "Daynizer (dev)" : isExperimental ? "Daynizer (Experimental)" : "Daynizer");
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "Open Daynizer", click: () => showMainWindow() },
-      { type: "separator" },
-      { label: "Quit", click: () => { isQuiting = true; app.quit(); } }
-    ]));
+    rebuildTrayMenu();
     tray.on("click", () => showMainWindow());
     tray.on("double-click", () => showMainWindow());
   } catch (err) {
@@ -247,9 +330,61 @@ function setupTray() {
   }
 }
 
+/** (Re)build the tray context menu. Includes a built-in-server status line +
+ *  start/stop when the server feature is enabled, so its state is visible and
+ *  controllable without a window (Syncthing-style; the full status UI is C1). */
+/** "just now" / "3 min ago" / "2 h ago" / "4 d ago" for the tray activity line. */
+function relativeTime(epochMs: number): string {
+  const s = Math.max(0, Math.round((Date.now() - epochMs) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+}
+
+function rebuildTrayMenu() {
+  if (!tray) return;
+  const items: Electron.MenuItemConstructorOptions[] = [
+    { label: "Open Daynizer", click: () => showMainWindow() }
+  ];
+  if (serverManager.isEnabled()) {
+    const s = serverManager.getStatus();
+    const label = !s.available
+      ? "Built-in server: unavailable"
+      : s.running
+        ? `Built-in server: running on :${s.port}`
+        : !s.enabled
+          ? "Built-in server: off"
+          : s.error
+            ? `Built-in server: ${s.error}`
+            : "Built-in server: stopped";
+    items.push(
+      { type: "separator" },
+      { label, enabled: false }
+    );
+    if (s.running && s.lastActivity) {
+      items.push({ label: `Last device sync: ${relativeTime(s.lastActivity)}`, enabled: false });
+    }
+    items.push(
+      s.running
+        ? { label: "Stop server", click: () => { serverManager.setEnabled(false); } }
+        : { label: "Start server", enabled: s.available, click: () => { serverManager.setEnabled(true); } }
+    );
+  }
+  items.push(
+    { type: "separator" },
+    { label: "Quit", click: () => { isQuiting = true; app.quit(); } }
+  );
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
 /** app.setLoginItemSettings covers Windows/macOS; on Linux we write (or
- *  remove) a freedesktop autostart entry instead. */
-function applyLaunchAtLogin(enabled: boolean) {
+ *  remove) a freedesktop autostart entry instead. When `hidden` is set, the
+ *  autostart launch carries `--hidden` (and macOS's openAsHidden) so the app
+ *  boots straight to the tray with no window (C1). */
+function applyLaunchAtLogin(enabled: boolean, hidden = getSetting("launchHidden") !== "0") {
   if (process.platform === "linux") {
     try {
       const dir = path.join(os.homedir(), ".config", "autostart");
@@ -259,7 +394,7 @@ function applyLaunchAtLogin(enabled: boolean) {
         fs.writeFileSync(file, `[Desktop Entry]
 Type=Application
 Name=Daynizer
-Exec="${process.execPath}"
+Exec="${process.execPath}"${hidden ? " --hidden" : ""}
 X-GNOME-Autostart-enabled=true
 `);
       } else if (fs.existsSync(file)) {
@@ -270,7 +405,13 @@ X-GNOME-Autostart-enabled=true
     }
     return;
   }
-  app.setLoginItemSettings({ openAtLogin: enabled });
+  // Windows: args are appended to the registry Run command, so `--hidden` reaches
+  // the autostarted process. macOS: openAsHidden hides the app at login.
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    openAsHidden: enabled && hidden && process.platform === "darwin",
+    args: hidden ? ["--hidden"] : []
+  });
 }
 
 // ---------- Reminders ----------
@@ -484,6 +625,8 @@ function registerIpc() {
   ipcMain.handle("settings:set", (_e, key: string, value: string) => {
     settingSet(key, value);
     if (key === "launchAtLogin") applyLaunchAtLogin(value === "1");
+    // Re-register the login item so a hidden/visible-start change takes effect.
+    if (key === "launchHidden") applyLaunchAtLogin(getSetting("launchAtLogin") === "1", value !== "0");
     if (key === "syncHotkey") buildMenu(); // apply new accelerator immediately
     if (key === "allowInsecureCerts") applyTlsSetting();
   });
@@ -768,6 +911,34 @@ function registerIpc() {
     } as any);
     return results;
   }));
+
+  // ---------- Built-in sync server (Phase B2) ----------
+  // Status is safe to expose broadly; getInfo() additionally returns the
+  // generated password (for the pairing screen / manual account add in C3) and
+  // is only reachable over this IPC channel, never broadcast.
+  ipcMain.handle("server:status", () => serverManager.getStatus());
+  ipcMain.handle("server:info", () => serverManager.getInfo());
+  ipcMain.handle("server:start", async () => { await serverManager.start(); return serverManager.getStatus(); });
+  ipcMain.handle("server:stop", async () => { await serverManager.stop(); return serverManager.getStatus(); });
+  ipcMain.handle("server:restart", async () => { await serverManager.restart(); return serverManager.getStatus(); });
+  // Config surface (B3/C3): the Settings "Sync Server" pane drives these.
+  ipcMain.handle("server:setEnabled", (_e, on: boolean) => serverManager.setEnabled(!!on));
+  ipcMain.handle("server:setPort", (_e, port: number) => serverManager.setPort(Number(port)));
+  ipcMain.handle("server:setCredentials", (_e, opts: { username?: string; password?: string }) => serverManager.setCredentials(opts || {}));
+  ipcMain.handle("server:regeneratePassword", () => serverManager.regeneratePassword());
+  ipcMain.handle("server:markConfigured", () => {
+    const status = serverManager.markConfigured();
+    // First-run consent point ("Got it"): make the server a real always-on service
+    // by enabling start-at-login (hidden, to the tray). Done once; the user can turn
+    // it off in the Sync Server pane afterwards.
+    if (getSetting("serverAutostartInit") !== "1") {
+      settingSet("serverAutostartInit", "1");
+      settingSet("launchAtLogin", "1");
+      settingSet("launchHidden", "1");
+      applyLaunchAtLogin(true, true);
+    }
+    return status;
+  });
 }
 
 // Single-instance lock. A second launch (double-click, autostart race, or a
@@ -797,11 +968,32 @@ app.whenReady().then(() => {
 
   registerIpc();
   buildMenu();
-  createWindow();
+  // Background start (C1): when launched at login with --hidden (or macOS's
+  // openAsHidden), boot straight to the tray with no window. The server still
+  // starts below and the tray is created; showMainWindow() reveals the window.
+  const startHidden = process.argv.includes("--hidden") || app.getLoginItemSettings().wasOpenedAsHidden;
+  createWindow(!startHidden);
   setupTray();
   setupAutoUpdater();
   applyLaunchAtLogin(getSetting("launchAtLogin") === "1");
   applyTlsSetting();
+
+  // Built-in sync server (Phase B2). No-op unless SERVER_BUILTIN is on. Lifecycle
+  // is tied to the APP, not the window: it starts here and stops on before-quit,
+  // so it keeps running while the window is hidden to tray. On any state change,
+  // refresh the tray status line and push status to the renderer (Settings/status
+  // UI subscribes via api.on("server:status", …); the UI itself lands in C1/C3).
+  serverManager.init({
+    log: syncLog,
+    onStatus: (status: ServerStatus) => {
+      rebuildTrayMenu();
+      mainWindow?.webContents.send("server:status", status);
+      // When the server is up, make sure Daynizer's own account points at it
+      // (creating it on first run, updating it after a port/credential change).
+      // Serialized with other syncs; guarded so unchanged configs are a no-op.
+      if (status.running) runExclusive(() => ensureSelfAccount());
+    }
+  });
 
   // First reminder pass shortly after launch (catches anything that came due
   // while the app was off), then once a minute.
@@ -813,8 +1005,18 @@ app.whenReady().then(() => {
   });
 });
 
-app.on("before-quit", () => { isQuiting = true; });
+app.on("before-quit", () => {
+  isQuiting = true;
+  // Best-effort clean shutdown of the built-in server child. before-quit can't
+  // await; the manager sends SIGTERM (then SIGKILL after a grace period), and the
+  // child was spawned with detached:false so it dies with the parent regardless.
+  serverManager.stop();
+});
 
 app.on("window-all-closed", () => {
+  // NOTE: this quits on window close (non-mac) unless "close to tray" is on, which
+  // also tears down the built-in server. Keeping the server alive headlessly after
+  // a window close in the default (non-tray) case is Phase C1 (background + boot +
+  // tray, with close-to-tray becoming the default once the server ships).
   if (process.platform !== "darwin") app.quit();
 });

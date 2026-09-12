@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { CaldavAccountPublic, DiscoveredCalendar, DiscoveredAddressBook, AddressBook, TaskList } from "../types";
+import { CaldavAccountPublic, DiscoveredCalendar, DiscoveredAddressBook, AddressBook, TaskList, ServerStatus, ServerInfo } from "../types";
 
 /** Renderer-side twin of db.ts's davUrlKey: normalize a CalDAV/CardDAV URL so
  *  http<->https, trailing-slash, default-port and host-casing differences don't
@@ -30,6 +30,18 @@ function cleanErr(err: any): string {
   m = m.replace(/^(?:[A-Z]\w*Error):\s*/, "");
   return m.trim() || "Unknown error";
 }
+/** "just now" / "3 min ago" / "2 h ago" / "4 d ago" for the last-device-sync line. */
+function relTime(epochMs: number): string {
+  const s = Math.max(0, Math.round((Date.now() - epochMs) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+}
+
+type SettingsPane = "accounts" | "calendars" | "contacts" | "sync" | "server" | "notifications";
 
 interface Props {
   lists: TaskList[];
@@ -39,9 +51,11 @@ interface Props {
   onSyncAccount: (accountId: string) => Promise<{ listId: string; pulled: number; pushed: number; errors: string[] }[]>;
   onReviewDuplicates: () => void;
   onImportVCard: () => void;
+  /** Pane to open on mount (e.g. "server" for the first-run server setup cue). */
+  initialPane?: SettingsPane;
 }
 
-export default function SettingsModal({ lists, addressBooks, onClose, onListsChanged, onSyncAccount, onReviewDuplicates, onImportVCard }: Props) {
+export default function SettingsModal({ lists, addressBooks, onClose, onListsChanged, onSyncAccount, onReviewDuplicates, onImportVCard, initialPane }: Props) {
   const [accounts, setAccounts] = useState<CaldavAccountPublic[]>([]);
   const [label, setLabel] = useState("");
   const [serverUrl, setServerUrl] = useState("");
@@ -62,8 +76,95 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
   const [version, setVersion] = useState<string>("");
   const [update, setUpdate] = useState<{ state: string; detail?: any } | null>(null);
   const [prefs, setPrefs] = useState<Record<string, string>>({});
-  type Pane = "accounts" | "calendars" | "contacts" | "sync" | "notifications";
-  const [activePane, setActivePane] = useState<Pane>("accounts");
+  type Pane = SettingsPane;
+  const [activePane, setActivePane] = useState<Pane>(initialPane ?? "accounts");
+
+  // ---- Built-in sync server (desktop only) ----
+  const [srv, setSrv] = useState<ServerInfo | null>(null);
+  const [srvUser, setSrvUser] = useState("");
+  const [srvPass, setSrvPass] = useState("");
+  const [srvPort, setSrvPort] = useState("");
+  const [showSrvPass, setShowSrvPass] = useState(false);
+  const [srvBusy, setSrvBusy] = useState(false);
+  const [srvMsg, setSrvMsg] = useState<string | null>(null);
+
+  async function loadServer() {
+    if (!window.api.server) return;
+    try {
+      const info = await window.api.server.info();
+      setSrv(info);
+      setSrvUser(info.username);
+      setSrvPass(info.password);
+      setSrvPort(String(info.preferredPort));
+    } catch { /* server IPC unavailable */ }
+  }
+  // Load when the pane opens; keep status fresh from main-process events (tray).
+  useEffect(() => { if (activePane === "server") loadServer(); }, [activePane]);
+  useEffect(() => {
+    if (!window.api.server) return;
+    return window.api.on("server:status", (s: ServerStatus) => {
+      setSrv((prev) => (prev ? { ...prev, ...s } : prev));
+    });
+  }, []);
+
+  async function srvToggle(on: boolean) {
+    if (!window.api.server) return;
+    setSrvBusy(true); setSrvMsg(null);
+    try {
+      await window.api.server.setEnabled(on);
+      await loadServer();
+      // Enabling the server auto-turns-on start-at-login the first time; re-read
+      // prefs so that checkbox reflects it.
+      window.api.settings?.all().then(setPrefs).catch(() => {});
+    }
+    catch (err: any) { setSrvMsg(cleanErr(err)); }
+    finally { setSrvBusy(false); }
+  }
+  async function srvApplyCreds() {
+    if (!window.api.server || !srv) return;
+    const usernameChanged = srvUser.trim() !== srv.username;
+    if (usernameChanged) {
+      const ok = window.confirm(
+        "Change the server username?\n\nThe server stores each user's calendars and contacts under their name, " +
+        "so any data already on the built-in server stays under the OLD username and the apps you've connected " +
+        "will see an empty account until you re-point them. The password can be changed safely on its own.\n\nContinue?"
+      );
+      if (!ok) return;
+    }
+    setSrvBusy(true); setSrvMsg(null);
+    try {
+      await window.api.server.setCredentials({ username: srvUser.trim(), password: srvPass });
+      await loadServer();
+      setSrvMsg("Saved. Update this username/password in any other apps you've connected.");
+    } catch (err: any) { setSrvMsg(cleanErr(err)); }
+    finally { setSrvBusy(false); }
+  }
+  async function srvApplyPort() {
+    if (!window.api.server) return;
+    setSrvBusy(true); setSrvMsg(null);
+    try {
+      await window.api.server.setPort(Number(srvPort));
+      await loadServer();
+      setSrvMsg("Port updated.");
+    } catch (err: any) { setSrvMsg(cleanErr(err)); }
+    finally { setSrvBusy(false); }
+  }
+  async function srvRegenerate() {
+    if (!window.api.server) return;
+    setSrvBusy(true); setSrvMsg(null);
+    try {
+      const info = await window.api.server.regeneratePassword();
+      setSrv(info); setSrvPass(info.password); setShowSrvPass(true);
+      setSrvMsg("New password generated. Update it in any connected apps.");
+    } catch (err: any) { setSrvMsg(cleanErr(err)); }
+    finally { setSrvBusy(false); }
+  }
+  function srvCopy(text: string, what: string) {
+    navigator.clipboard?.writeText(text).then(
+      () => setSrvMsg(`${what} copied.`),
+      () => setSrvMsg(`Couldn't copy ${what} — select and copy manually.`)
+    );
+  }
 
   useEffect(() => {
     window.api.app?.version().then(setVersion).catch(() => {});
@@ -439,6 +540,9 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
     { id: "calendars", label: "Calendars & Lists" },
     { id: "contacts", label: "Contacts" },
     { id: "sync", label: "Sync" },
+    // Built-in sync server pane: desktop only (the add-on has no server) and only
+    // when the feature is compiled in.
+    ...(window.api.server ? [{ id: "server" as Pane, label: "Sync Server" }] : []),
     // The Thunderbird add-on has no settings/reminder subsystem (window.api.settings
     // is undefined there), so hide the empty Notifications & Startup pane for it.
     ...(window.api.settings ? [{ id: "notifications" as Pane, label: "Notifications & Startup" }] : [])
@@ -782,6 +886,185 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
                 </select>
               </label>
             </div>
+            </>
+          )}
+
+          {activePane === "server" && (
+            <>
+              <p style={{ color: "#9aa0a6", fontSize: 12 }}>
+                Daynizer can host its own CalDAV/CardDAV sync server, so your tasks, calendar and
+                contacts sync across devices with no third-party account. One address serves both
+                calendars and contacts — add it to Daynizer on another computer, or to apps like
+                DAVx5, Tasks.org, Apple Calendar or Thunderbird.
+              </p>
+
+              {srv && srv.available && !srv.configured && (
+                <div className="account-card" style={{ borderColor: "#4a90d9" }}>
+                  <strong>Your sync server is ready</strong>
+                  <p style={{ fontSize: 12, color: "#9aa0a6", margin: "6px 0" }}>
+                    We generated a username and password for you (below). Use them as they are, or
+                    change them now — then click "Got it". Daynizer will start with your computer and
+                    keep the server running quietly in the tray, so your other devices can always sync.
+                    You can change any of this here later.
+                  </p>
+                  <button
+                    className="primary"
+                    disabled={srvBusy}
+                    onClick={async () => {
+                      await window.api.server!.markConfigured();
+                      await loadServer();
+                      window.api.settings?.all().then(setPrefs).catch(() => {});
+                    }}
+                  >
+                    Got it
+                  </button>
+                </div>
+              )}
+
+              {srv && !srv.available && (
+                <div className="status error">The bundled server isn't available in this build.</div>
+              )}
+
+              <label className="pref-row" style={{ marginTop: 4 }} title="Runs the built-in server in the background. It keeps running while Daynizer is in the tray.">
+                <input
+                  type="checkbox"
+                  checked={!!srv?.enabled}
+                  disabled={srvBusy || !srv?.available}
+                  onChange={(e) => srvToggle(e.target.checked)}
+                />
+                Run the built-in sync server
+              </label>
+
+              {window.api.settings && (
+                <label className="pref-row pref-indent" title="Starts Daynizer automatically when you log in and boots straight to the tray (no window), so the server is always available for your other devices.">
+                  <input
+                    type="checkbox"
+                    checked={prefs.launchAtLogin === "1"}
+                    disabled={srvBusy || !srv?.enabled}
+                    onChange={(e) => { setPref("launchAtLogin", e.target.checked ? "1" : "0"); if (e.target.checked) setPref("launchHidden", "1"); }}
+                  />
+                  Start at login and run in the background (recommended)
+                </label>
+              )}
+
+              <div className="status">
+                Status:{" "}
+                {srv?.running
+                  ? `running on port ${srv.port}`
+                  : srv?.enabled
+                    ? (srv.error ? `not running (${srv.error})` : "starting…")
+                    : "off"}
+              </div>
+              {srv?.note && <div className="status" style={{ color: "#e8a23d" }}>{srv.note}</div>}
+              {srv?.running && srv.lastActivity && (
+                <div className="status">Last device sync: {relTime(srv.lastActivity)}</div>
+              )}
+
+              {srv?.running && (
+                <>
+                  <h3 style={{ marginTop: 18 }}>Connect other apps</h3>
+                  <p style={{ color: "#9aa0a6", fontSize: 12 }}>
+                    Use this one address in any CalDAV/CardDAV app — it finds both your calendars
+                    and your contacts. On the same computer, use the local address instead.
+                  </p>
+                  <div className="prefs-grid">
+                    <label className="pref-row">
+                      Address (other devices)
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input readOnly value={srv.baseUrl ?? ""} style={{ width: 260 }} />
+                        <button onClick={() => srvCopy(srv.baseUrl ?? "", "Address")}>Copy</button>
+                      </span>
+                    </label>
+                    <label className="pref-row">
+                      Address (this computer)
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input readOnly value={srv.localUrl ?? ""} style={{ width: 260 }} />
+                        <button onClick={() => srvCopy(srv.localUrl ?? "", "Local address")}>Copy</button>
+                      </span>
+                    </label>
+                  </div>
+                </>
+              )}
+
+              <h3 style={{ marginTop: 18 }}>Credentials</h3>
+              <div className="prefs-grid">
+                <label className="pref-row">
+                  Username
+                  <input value={srvUser} onChange={(e) => setSrvUser(e.target.value)} disabled={srvBusy} style={{ width: 200 }} />
+                </label>
+                <label className="pref-row">
+                  Password
+                  <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input
+                      type={showSrvPass ? "text" : "password"}
+                      value={srvPass}
+                      onChange={(e) => setSrvPass(e.target.value)}
+                      disabled={srvBusy}
+                      style={{ width: 200 }}
+                    />
+                    <button type="button" onClick={() => setShowSrvPass((v) => !v)} title={showSrvPass ? "Hide password" : "Show password"}>
+                      {showSrvPass ? "🙈" : "👁"}
+                    </button>
+                    <button onClick={() => srvCopy(srvPass, "Password")}>Copy</button>
+                  </span>
+                </label>
+              </div>
+              <div className="settings-tools" style={{ marginTop: 8 }}>
+                <button className="primary" onClick={srvApplyCreds} disabled={srvBusy}>Save credentials</button>
+                <button onClick={srvRegenerate} disabled={srvBusy}>Regenerate password</button>
+              </div>
+              <div style={{ fontSize: 11, color: "#9aa0a6", marginTop: 6 }}>
+                Changing the password is safe. Changing the username starts a fresh account on the
+                server (existing data stays under the old name).
+              </div>
+
+              <h3 style={{ marginTop: 18 }}>Port</h3>
+              <label className="pref-row" style={{ maxWidth: 360 }}>
+                Server port
+                <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input type="number" min={1024} max={65535} value={srvPort} onChange={(e) => setSrvPort(e.target.value)} disabled={srvBusy} style={{ width: 90 }} />
+                  <button onClick={srvApplyPort} disabled={srvBusy}>Apply</button>
+                </span>
+              </label>
+              <div style={{ fontSize: 11, color: "#9aa0a6", marginTop: 6 }}>
+                Default 5232 (the standard CalDAV/CardDAV port). Keeping it fixed means connected
+                apps don't need reconfiguring. If it's ever already in use, Daynizer temporarily
+                picks another and notes it above.
+              </div>
+
+              <h3 style={{ marginTop: 18 }}>How to connect</h3>
+              <details>
+                <summary style={{ cursor: "pointer", fontSize: 13, marginBottom: 4 }}>DAVx5 + Tasks.org (Android)</summary>
+                <ol style={{ fontSize: 12, color: "#c8c8c8", lineHeight: 1.7, marginTop: 4 }}>
+                  <li>Make sure the phone is on the same Wi-Fi as this computer.</li>
+                  <li>In DAVx5: <strong>+</strong> → "Login with URL and user name".</li>
+                  <li>Base URL: the <em>other devices</em> address above. Username / password: the ones above.</li>
+                  <li>Finish, then tick the calendars, contacts and task lists it finds.</li>
+                  <li>For tasks, install <strong>Tasks.org</strong> (or OpenTasks) so DAVx5 can sync them.</li>
+                </ol>
+              </details>
+              <details>
+                <summary style={{ cursor: "pointer", fontSize: 13, marginBottom: 4 }}>Apple Calendar / Contacts (macOS, iPhone)</summary>
+                <ol style={{ fontSize: 12, color: "#c8c8c8", lineHeight: 1.7, marginTop: 4 }}>
+                  <li>Settings → Calendar → Accounts → Add Account → Other → Add CalDAV account.</li>
+                  <li>Account type "Advanced"; Server: this computer's IP; Port: the port above; turn SSL off (LAN).</li>
+                  <li>Use the username and password above. Repeat under Contacts for a CardDAV account.</li>
+                </ol>
+              </details>
+              <details>
+                <summary style={{ cursor: "pointer", fontSize: 13, marginBottom: 4 }}>Thunderbird</summary>
+                <ol style={{ fontSize: 12, color: "#c8c8c8", lineHeight: 1.7, marginTop: 4 }}>
+                  <li>New Calendar → On the Network → paste the address above, enter the username/password.</li>
+                  <li>Address Book → New → CardDAV Address Book → same address and credentials.</li>
+                </ol>
+              </details>
+              <p style={{ fontSize: 12, marginTop: 10 }}>
+                <a href="https://precisioncrab.com/daynizer/connect/" target="_blank" rel="noreferrer" style={{ color: "#4a90d9" }}>
+                  Full connection guide →
+                </a>
+              </p>
+
+              {srvMsg && <p style={{ fontSize: 12, color: "#9aa0a6" }}>{srvMsg}</p>}
             </>
           )}
 

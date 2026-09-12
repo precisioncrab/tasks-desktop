@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@event-calendar/core": "^5.9.0",
+    "bcryptjs": "^2.4.3",
     "electron-updater": "^6.3.9",
     "ical.js": "^2.1.0",
     "nanoid": "^5.0.7",
@@ -31,6 +32,7 @@
     "tsdav": "^2.1.3"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "latest",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
@@ -72,7 +74,13 @@
     "win": {
       "target": "nsis",
       "icon": "build/icon.ico",
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "extraResources": [
+        {
+          "from": "server/dist/daynizer-radicale",
+          "to": "daynizer-radicale"
+        }
+      ]
     },
     "linux": {
       "target": [

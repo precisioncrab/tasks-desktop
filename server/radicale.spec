@@ -46,7 +46,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter"],  # Radicale is headless; drop the GUI toolkit
+    # Radicale is headless; drop the GUI toolkit. passlib.tests is pulled in by the
+    # passlib hook but is test-only bloat — exclude it to shrink the artifact.
+    excludes=["tkinter", "passlib.tests"],
     noarchive=False,
 )
 
@@ -66,7 +68,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,  # keep the console during recon so logs are visible; hide for ship
+    # No console window: the Electron main process spawns this with windowsHide
+    # and pipes its stdout/stderr into the app log, so a visible console would just
+    # be a stray black window on every server start. (Was True during recon.)
+    console=False,
     disable_windowed_traceback=False,
 )
 
