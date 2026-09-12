@@ -165,6 +165,16 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
       () => setSrvMsg(`Couldn't copy ${what} — select and copy manually.`)
     );
   }
+  async function srvOpenFirewall() {
+    if (!window.api.server) return;
+    setSrvBusy(true); setSrvMsg(null);
+    try {
+      const r = await window.api.server.openFirewall();
+      setSrvMsg(r.message);
+      window.api.settings?.all().then(setPrefs).catch(() => {});
+    } catch (err: any) { setSrvMsg(cleanErr(err)); }
+    finally { setSrvBusy(false); }
+  }
 
   useEffect(() => {
     window.api.app?.version().then(setVersion).catch(() => {});
@@ -983,6 +993,21 @@ export default function SettingsModal({ lists, addressBooks, onClose, onListsCha
                       </span>
                     </label>
                   </div>
+                  {srv.platform === "win32" && (
+                    <div style={{ marginTop: 10 }}>
+                      {prefs.firewallRuleAdded === "1" ? (
+                        <div className="status">Windows Firewall: other devices allowed ✓</div>
+                      ) : (
+                        <>
+                          <button onClick={srvOpenFirewall} disabled={srvBusy}>Allow other devices through Windows Firewall</button>
+                          <div style={{ fontSize: 11, color: "#9aa0a6", marginTop: 4 }}>
+                            A one-time Windows permission prompt so phones and other computers on your
+                            network can reach the server. Without it, Windows may block them.
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
 

@@ -56,6 +56,7 @@ export type ServerStatus = {
   error: string | null;    // last fatal-ish error, or null
   note: string | null;     // non-fatal note (e.g. preferred port was in use)
   lastActivity: number | null; // epoch ms of the last request from a non-loopback client, or null
+  platform: NodeJS.Platform; // so the UI can show OS-specific controls (firewall on Windows)
 };
 
 export type ServerInfo = ServerStatus & { password: string };
@@ -109,6 +110,10 @@ class ServerManager {
     return null;
   }
 
+  /** Absolute path to the frozen server binary (or null). Public so main can
+   *  build a program-scoped Windows Firewall rule for it (C2). */
+  getBinaryPath(): string | null { return this.binaryPath(); }
+
   /** Compile flag — the tray/UI use this to decide whether to show server controls. */
   isEnabled() { return SERVER_BUILTIN; }
   /** User toggle (defaults ON). Independent of the compile flag. Public so the
@@ -133,7 +138,8 @@ class ServerManager {
       username: getSetting(KEY_USER) || DEFAULT_USER,
       error: this.error,
       note: this.note,
-      lastActivity: this.lastActivity
+      lastActivity: this.lastActivity,
+      platform: process.platform
     };
   }
 

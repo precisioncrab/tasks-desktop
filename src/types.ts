@@ -182,6 +182,7 @@ export interface ServerStatus {
   error: string | null;
   note: string | null;     // non-fatal note (e.g. preferred port was taken)
   lastActivity: number | null; // epoch ms of the last request from another device
+  platform: string;        // process.platform — "win32" gates the firewall control
 }
 export interface ServerInfo extends ServerStatus { password: string; }
 
@@ -313,6 +314,7 @@ declare global {
         setCredentials: (opts: { username?: string; password?: string }) => Promise<ServerStatus>;
         regeneratePassword: () => Promise<ServerInfo>;
         markConfigured: () => Promise<ServerStatus>;
+        openFirewall: () => Promise<{ ok: boolean; message: string }>;
       };
       on: (channel: string, callback: (...args: any[]) => void) => () => void;
     };

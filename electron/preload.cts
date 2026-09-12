@@ -94,7 +94,8 @@ const api = {
     setPort: (port: number) => ipcRenderer.invoke("server:setPort", port),
     setCredentials: (opts: { username?: string; password?: string }) => ipcRenderer.invoke("server:setCredentials", opts),
     regeneratePassword: () => ipcRenderer.invoke("server:regeneratePassword"),
-    markConfigured: () => ipcRenderer.invoke("server:markConfigured")
+    markConfigured: () => ipcRenderer.invoke("server:markConfigured"),
+    openFirewall: () => ipcRenderer.invoke("server:openFirewall")
   },
   on: (channel: string, callback: (...args: any[]) => void) => {
     const listener = (_e: any, ...args: any[]) => callback(...args);

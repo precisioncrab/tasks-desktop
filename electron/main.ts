@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import electronUpdater from "electron-updater";
 
 const { autoUpdater } = electronUpdater;
@@ -94,6 +95,7 @@ const SETTING_DEFAULTS: Record<string, string> = {
   closeToTray: "0", // off by default: the X button really quits; opt in via settings
   launchAtLogin: "0",
   launchHidden: "1", // when autostarting, boot to the tray with no window (C1)
+  firewallRuleAdded: "0", // Windows: set once the inbound firewall rule is in place (C2)
   syncIntervalMinutes: "60", // background auto-sync; matches Tasks.org's default; "0" = manual only
   syncHotkey: "CmdOrCtrl+R", // accelerator for Sync Now; "" = no hotkey
   allowInsecureCerts: "0" // opt-in: accept self-signed TLS certs (self-hosted LAN servers)
@@ -192,7 +194,9 @@ async function ensureSelfAccount(): Promise<void> {
     }
 
     settingSet(SELF_ACCOUNT_SIG_KEY, sig);
-    mainWindow?.webContents.send("server:accountReady");
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send("server:accountReady");
+    }
   } catch (err: any) {
     syncLog(`ensureSelfAccount failed: ${err?.message || err}`);
   } finally {
@@ -345,7 +349,7 @@ function relativeTime(epochMs: number): string {
 }
 
 function rebuildTrayMenu() {
-  if (!tray) return;
+  if (!tray || tray.isDestroyed()) return;
   const items: Electron.MenuItemConstructorOptions[] = [
     { label: "Open Daynizer", click: () => showMainWindow() }
   ];
@@ -411,6 +415,50 @@ X-GNOME-Autostart-enabled=true
     openAtLogin: enabled,
     openAsHidden: enabled && hidden && process.platform === "darwin",
     args: hidden ? ["--hidden"] : []
+  });
+}
+
+// ---------- Windows Firewall (C2) ----------
+// So a phone/other computer can actually reach the built-in server, add an inbound
+// allow rule. This needs admin, so we elevate a one-shot `netsh` via PowerShell's
+// Start-Process -Verb RunAs (one UAC prompt). The rule is scoped to the frozen
+// server binary (program rule) and the Private profile, so it keeps working across
+// port changes and never opens the machine on public networks. Only meaningful on
+// Windows; a no-op elsewhere (Linux/macOS firewalls, if any, are the user's own).
+const FIREWALL_RULE_NAME = "Daynizer Sync Server";
+
+async function openFirewallPort(): Promise<{ ok: boolean; message: string }> {
+  if (process.platform !== "win32") {
+    return { ok: false, message: "Firewall setup is only needed on Windows." };
+  }
+  const bin = serverManager.getBinaryPath();
+  if (!bin) return { ok: false, message: "The bundled server isn't available." };
+
+  // Rebuild the rule cleanly: delete any prior one, then add. Both run inside one
+  // elevated cmd; the delete's output is suppressed so a first-time "no rule" is quiet.
+  const del = `netsh advfirewall firewall delete rule name="${FIREWALL_RULE_NAME}" >nul 2>&1`;
+  const add = `netsh advfirewall firewall add rule name="${FIREWALL_RULE_NAME}" dir=in action=allow program="${bin}" enable=yes profile=private`;
+  const inner = `${del} & ${add}`;
+  // Elevate cmd, wait, and surface the child's exit code. UAC-declined → code 1223.
+  const ps = `try { $p = Start-Process -FilePath cmd.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '/c','${inner.replace(/'/g, "''")}' -ErrorAction Stop; exit $p.ExitCode } catch { exit 1223 }`;
+
+  return await new Promise((resolve) => {
+    let stderr = "";
+    const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], { windowsHide: true });
+    child.stderr?.on("data", (b) => { stderr += b.toString(); });
+    child.on("error", (err) => resolve({ ok: false, message: `Couldn't run the firewall command: ${err.message}` }));
+    child.on("exit", (code) => {
+      if (code === 0) {
+        settingSet("firewallRuleAdded", "1");
+        syncLog(`[server] firewall rule added for ${bin}`);
+        resolve({ ok: true, message: "Windows Firewall now allows other devices to reach the sync server." });
+      } else if (code === 1223) {
+        resolve({ ok: false, message: "The Windows permission prompt was declined — other devices may not be able to connect until it's allowed." });
+      } else {
+        syncLog(`[server] firewall rule failed (code ${code}) ${stderr.trim()}`);
+        resolve({ ok: false, message: `Couldn't add the firewall rule (code ${code}).` });
+      }
+    });
   });
 }
 
@@ -926,7 +974,7 @@ function registerIpc() {
   ipcMain.handle("server:setPort", (_e, port: number) => serverManager.setPort(Number(port)));
   ipcMain.handle("server:setCredentials", (_e, opts: { username?: string; password?: string }) => serverManager.setCredentials(opts || {}));
   ipcMain.handle("server:regeneratePassword", () => serverManager.regeneratePassword());
-  ipcMain.handle("server:markConfigured", () => {
+  ipcMain.handle("server:markConfigured", async () => {
     const status = serverManager.markConfigured();
     // First-run consent point ("Got it"): make the server a real always-on service
     // by enabling start-at-login (hidden, to the tray). Done once; the user can turn
@@ -937,8 +985,14 @@ function registerIpc() {
       settingSet("launchHidden", "1");
       applyLaunchAtLogin(true, true);
     }
+    // Also open the Windows Firewall for other devices, once (one UAC prompt at
+    // setup). If declined, the pane's "Allow through Windows Firewall" button retries.
+    if (process.platform === "win32" && getSetting("firewallRuleAdded") !== "1") {
+      try { await openFirewallPort(); } catch { /* non-fatal; button retries */ }
+    }
     return status;
   });
+  ipcMain.handle("server:openFirewall", () => openFirewallPort());
 }
 
 // Single-instance lock. A second launch (double-click, autostart race, or a
@@ -986,8 +1040,15 @@ app.whenReady().then(() => {
   serverManager.init({
     log: syncLog,
     onStatus: (status: ServerStatus) => {
+      // The child's exit fires this during app quit, after the window/tray are
+      // already destroyed — pushing to them then throws "Object has been destroyed"
+      // and crashes the main process. Skip all UI work once we're quitting, and
+      // guard the send against a torn-down webContents either way.
+      if (isQuiting) return;
       rebuildTrayMenu();
-      mainWindow?.webContents.send("server:status", status);
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send("server:status", status);
+      }
       // When the server is up, make sure Daynizer's own account points at it
       // (creating it on first run, updating it after a port/credential change).
       // Serialized with other syncs; guarded so unchanged configs are a no-op.
